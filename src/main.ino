@@ -51,7 +51,7 @@ For different SoCs, the related GPIOs are:
 - ESP32-C6: 0-7
 - ESP32-H2: 7-14
 */
-#define BUTTON_PIN_BITMASK (1ULL << GPIO_NUM_2) // GPIO 2 (D2) bitmask for ext1
+#define BUTTON_PIN_BITMASK (1ULL << D2) // GPIO 2 (D2) bitmask for ext1
 RTC_DATA_ATTR int bootCount = 0;
 #define uS_TO_S_FACTOR 1000000ULL  /* Conversion factor for micro seconds to seconds */
 #define TIME_TO_SLEEP  7200        /* Time ESP32 will go to sleep (in seconds) */
@@ -64,8 +64,8 @@ uint8_t button = BOOT_PIN;
 
 ZigbeeBinary zbBinarySmoke = ZigbeeBinary(BINARY_DEVICE_ENDPOINT_NUMBER);
 
+bool zigbeeConnected = false;
 bool binaryStatus = false;
-bool reportRequired = false;
 bool messageSent = false;
 
 
@@ -90,7 +90,97 @@ void print_wakeup_reason(){
 }
 
 void zigbee_receive_callback(zb_cmd_type_t resp_to_cmd, esp_zb_zcl_status_t status, uint8_t endpoint, uint16_t cluster) {
+  Serial.printf("callback: cmd=%d status=%d ep=%d cluster=%d\n", resp_to_cmd, status, endpoint, cluster);
   messageSent = true;
+}
+
+void configure_default_wake_up(){
+  //If you were to use ext1, you would use it like
+  esp_sleep_enable_ext1_wakeup(BUTTON_PIN_BITMASK,ESP_EXT1_WAKEUP_ANY_HIGH);
+  /*
+  First we configure the wake up source
+  We set our ESP32 to wake up every 2h
+  */
+  esp_sleep_enable_timer_wakeup(TIME_TO_SLEEP * uS_TO_S_FACTOR);
+  Serial.println("Setup ESP32 to sleep for every " + String(TIME_TO_SLEEP) + " Seconds");
+}
+
+void configure_alert_wake_up(){
+    // disable GPIO wakeup because their is high state that will wakeup in loop
+    esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
+    // wake up timer shorter to received update of smoke detector
+    esp_sleep_enable_timer_wakeup(15 * uS_TO_S_FACTOR);
+}
+
+void connect_zigbee(bool is_setup) {
+  if (zigbeeConnected){
+    return;
+  }
+  if (is_setup) {
+    Serial.println("Starting Zigbee...");
+    // When all EPs are registered, start Zigbee in End Device mode
+    if (!Zigbee.begin()) {
+      Serial.println("Zigbee failed to start!");
+      Serial.println("Rebooting...");
+      ESP.restart();
+    } else {
+      Serial.println("Zigbee started successfully!");
+    }
+  }
+  Serial.println("Connecting to network");
+  int waitCount = 0;
+  while (!Zigbee.connected()) {
+    ++waitCount;
+    Serial.print(".");
+    delay(100);
+    if (waitCount >= 100) {
+      ESP.restart();
+    }
+  }
+  zigbeeConnected = true;
+  Serial.println("Connected");
+  delay(1000); // let stack stabilize after rejoin
+}
+
+
+void check_for_reset(){
+  // Checking button for factory reset and reporting
+  if (digitalRead(button) == LOW) {  // Push button pressed
+    Serial.println("boot button pressed");
+    // Key debounce handling
+    delay(100);
+    int startTime = millis();
+    while (digitalRead(button) == LOW) {
+      delay(50);
+      if ((millis() - startTime) > 3000) {
+        // If key pressed for more than 3secs, factory reset Zigbee and reboot
+        Serial.println("Resetting Zigbee to factory and rebooting in 1s.");
+        digitalWrite(LED_BUILTIN, HIGH);
+        delay(1000);
+        digitalWrite(LED_BUILTIN, LOW);
+        delay(1000);
+        digitalWrite(LED_BUILTIN, HIGH);
+        Zigbee.factoryReset();
+      }
+    }
+  }
+}
+
+void send_data(){
+  Serial.println("sending_data");
+  messageSent = false;
+  zbBinarySmoke.setBinaryInput(binaryStatus);
+  zbBinarySmoke.reportBinaryInput();
+  int waitCount = 0;
+  while (!messageSent)
+  {
+    delay(100);
+    if (waitCount % 10 == 0) digitalWrite(LED_BUILTIN, HIGH);
+    else digitalWrite(LED_BUILTIN, LOW);
+    // Re-sent
+    if (waitCount % 20 == 0) zbBinarySmoke.reportBinaryInput();
+    if (++waitCount >= 300) ESP.restart(); // 30s timeout
+  }
 }
 
 void setup() {
@@ -104,15 +194,8 @@ void setup() {
   //Print the wakeup reason for ESP32
   print_wakeup_reason();
 
-  //If you were to use ext1, you would use it like
-  esp_sleep_enable_ext1_wakeup(BUTTON_PIN_BITMASK,ESP_EXT1_WAKEUP_ANY_HIGH);
-  /*
-  First we configure the wake up source
-  We set our ESP32 to wake up every 2h
-  */
-  esp_sleep_enable_timer_wakeup(TIME_TO_SLEEP * uS_TO_S_FACTOR);
-  Serial.println("Setup ESP32 to sleep for every " + String(TIME_TO_SLEEP) + " Seconds");
-
+  // Configure default wakeup
+  configure_default_wake_up();
 
 
   // Init button switch
@@ -137,74 +220,36 @@ void setup() {
   Zigbee.onGlobalDefaultResponse(zigbee_receive_callback);
   Zigbee.addEndpoint(&zbBinarySmoke);
 
-  Serial.println("Starting Zigbee...");
-  // When all EPs are registered, start Zigbee in End Device mode
-  if (!Zigbee.begin()) {
-    Serial.println("Zigbee failed to start!");
-    Serial.println("Rebooting...");
-    ESP.restart();
-  } else {
-    Serial.println("Zigbee started successfully!");
-  }
-  Serial.println("Connecting to network");
-  while (!Zigbee.connected()) {
-    Serial.print(".");
-    delay(100);
-  }
-  Serial.println("Connected");
+  connect_zigbee(true);
 }
 
 void loop() {
-  // Checking button for factory reset and reporting
-  if (digitalRead(button) == LOW) {  // Push button pressed
-    // Key debounce handling
-    delay(100);
-    int startTime = millis();
-    while (digitalRead(button) == LOW) {
-      delay(50);
-      if ((millis() - startTime) > 3000) {
-        // If key pressed for more than 3secs, factory reset Zigbee and reboot
-        Serial.println("Resetting Zigbee to factory and rebooting in 1s.");
-        delay(1000);
-        Zigbee.factoryReset();
-      }
-    }
-  }
+  digitalWrite(LED_BUILTIN, LOW);
+  check_for_reset();
+  // only for light sleep
+  //connect_zigbee(false);
 
-  reportRequired = false;
   if (digitalRead(sensorPin) == HIGH) {
-    if (!binaryStatus) {
-      reportRequired = true;
-    }
     binaryStatus = true;
+    Serial.println("smoke detected !");
   } else {
-    if (binaryStatus) {
-      reportRequired = true;
-    }
     binaryStatus = false;
   }
    
-  messageSent = false;
-  if (reportRequired) {
-    zbBinarySmoke.setBinaryInput(binaryStatus);
-    //zbBinarySmoke.reportBinaryInput();
-  }
-  if (binaryStatus) {
-    // disable GPIO wakeup because their is high state that will wakeup in loop
-    esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
-    // wake up timer shorter to received update of smoke detector
-    esp_sleep_enable_timer_wakeup(15 * uS_TO_S_FACTOR);
-  } 
+  send_data();
 
-  zbBinarySmoke.reportBinaryInput();
-  while (!messageSent)
-  {
-    delay(50);
+  if (binaryStatus) {
+      configure_alert_wake_up();
+  } else {
+      configure_default_wake_up();
   }
+    
   digitalWrite(LED_BUILTIN, HIGH);
   //Go to sleep now
   Serial.println("Going to sleep now");
+  zigbeeConnected = false;
   esp_deep_sleep_start();
+  //esp_light_sleep_start();
   Serial.println("This will never be printed");
   delay(200);
 }

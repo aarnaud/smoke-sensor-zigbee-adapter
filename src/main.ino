@@ -94,6 +94,21 @@ void zigbee_receive_callback(zb_cmd_type_t resp_to_cmd, esp_zb_zcl_status_t stat
   messageSent = true;
 }
 
+float get_battery_voltage() {
+  uint32_t vBatt = 0;
+  for (int i = 0; i < 16; i++) {
+    vBatt += analogReadMilliVolts(A0);
+  }
+  return 2.0f * vBatt / 16.0f / 1000.0f; // voltage divider x2, average /16, mV to V
+}
+
+uint8_t get_battery_percentage(float voltage) {
+  float pct = (voltage - 3.0f) / (4.2f - 3.0f) * 100.0f;
+  if (pct < 0) pct = 0;
+  if (pct > 100) pct = 100;
+  return (uint8_t)pct;
+}
+
 void configure_default_wake_up(){
   //If you were to use ext1, you would use it like
   esp_sleep_enable_ext1_wakeup(BUTTON_PIN_BITMASK,ESP_EXT1_WAKEUP_ANY_HIGH);
@@ -181,6 +196,13 @@ void send_data(){
     if (waitCount % 20 == 0) zbBinarySmoke.reportBinaryInput();
     if (++waitCount >= 300) ESP.restart(); // 30s timeout
   }
+
+  float vBat = get_battery_voltage();
+  uint8_t pct = get_battery_percentage(vBat);
+  Serial.printf("Battery: %.2fV (%d%%)\n", vBat, pct);
+  zbBinarySmoke.setBatteryPercentage(pct);
+  zbBinarySmoke.setBatteryVoltage((uint8_t)(vBat * 10));
+  zbBinarySmoke.reportBatteryPercentage();
 }
 
 void setup() {
@@ -216,6 +238,10 @@ void setup() {
   zbBinarySmoke.setBinaryInputApplication(BINARY_INPUT_APPLICATION_TYPE_SECURITY_SMOKE_DETECTION);
   zbBinarySmoke.setBinaryInputDescription("Smoke Detector");
 
+  // Set up battery reporting
+  float vBat = get_battery_voltage();
+  zbBinarySmoke.setPowerSource(ZB_POWER_SOURCE_BATTERY, get_battery_percentage(vBat), (uint8_t)(vBat * 10));
+
   // Add endpoints to Zigbee Core
   Zigbee.onGlobalDefaultResponse(zigbee_receive_callback);
   Zigbee.addEndpoint(&zbBinarySmoke);
@@ -237,6 +263,7 @@ void loop() {
   }
    
   send_data();
+  delay(500); // let battery report transmit
 
   if (binaryStatus) {
       configure_alert_wake_up();
